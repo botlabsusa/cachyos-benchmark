@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.0.1 — 2026-11-01
+
+- Added support contact (`support@botlabsusa.com`) in README and About
+
 ## 1.0.0 — 2026-11-01
 
 First AppImage release of CachyOS Benchmark.

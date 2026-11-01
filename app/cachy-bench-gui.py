@@ -1123,6 +1123,7 @@ def run_gui() -> int:
                 f"<b>{APP_NAME}</b> {__version__}<br>"
                 f"Copyright (c) 2026 Botlabs USA<br>"
                 f"License: MIT<br>"
+                f"Support: support@botlabsusa.com<br>"
                 f"<small>{license_note}</small><br><br>"
                 "Run, log, and compare CachyOS performance baselines.",
             )
@@ -1160,7 +1161,7 @@ def run_gui() -> int:
 
 def main() -> int:
     if "--version" in sys.argv or "-V" in sys.argv:
-        print(f"{APP_NAME} {__version__}")
+        print(f"{APP_NAME} {__version__}\nSupport: support@botlabsusa.com")
         return 0
     if "--selftest" in sys.argv:
         return selftest()
