@@ -1,5 +1,7 @@
 # CachyOS Benchmark
 
+[![Support on Patreon](https://img.shields.io/badge/Patreon-Support%20Botlabs-F96854?logo=patreon&logoColor=white)](https://www.patreon.com/botlabs)
+
 Repeatable ~10-minute CPU, memory, storage, and graphics baseline for CachyOS. Bash workloads write `results.csv` and per-run logs; a PySide6 GUI compares runs, charts scores, and shows a noise-aware “what changed” report (including pacman.log package deltas).
 
 ## Features
@@ -80,3 +82,7 @@ Outputs under `dist/`:
 ## License
 
 MIT License. Copyright (c) 2026 Botlabs USA. See [LICENSE](LICENSE).
+
+## Support Botlabs
+
+Botlabs apps are free. If they help you, consider supporting development on [Patreon](https://www.patreon.com/botlabs) for early builds, feature votes and your name in the app credits.
