@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=CachyOS Benchmark
+GenericName=System Benchmark
+Comment=Run, log, and compare CachyOS performance baselines
+Exec=cachy-bench
+Icon=cachy-bench
+Categories=System;Utility;
+Terminal=false
+StartupNotify=true
+StartupWMClass=CachyOS Benchmark
+X-AppImage-Version=1.0.0

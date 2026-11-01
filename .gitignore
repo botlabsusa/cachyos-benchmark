@@ -1,0 +1,11 @@
+dist/
+build/
+*.AppImage
+*.AppDir
+squashfs-root/
+__pycache__/
+*.bak*
+results.csv
+runs/
+tmp/
+tools/
