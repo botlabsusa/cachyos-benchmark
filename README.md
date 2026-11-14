@@ -4,6 +4,22 @@
 
 Repeatable ~10-minute CPU, memory, storage, and graphics baseline for CachyOS. Bash workloads write `results.csv` and per-run logs; a PySide6 GUI compares runs, charts scores, and shows a noise-aware “what changed” report (including pacman.log package deltas).
 
+## Screenshots
+
+![Run tab with live temperature gauges](docs/screenshots/01-run.png)
+
+*Run tab — live CPU and GPU temperature gauges, log, and controls.*
+
+![History tab](docs/screenshots/02-history.png)
+
+*History — select and delete runs, with undo.*
+
+![Compare tab](docs/screenshots/03-compare.png)
+
+*Compare — scores and charts across runs.*
+
+More views: [What changed](docs/screenshots/04-what-changed.png) · [Temperature gauges close-up](docs/screenshots/05-gauges-closeup.png)
+
 ## Features
 
 - Shell suite: 7-Zip, sysbench (CPU/memory), zstd, x264 via ffmpeg, fio, vkmark, glmark2, cyclictest
