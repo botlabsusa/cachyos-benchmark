@@ -7,8 +7,8 @@ Repeatable ~10-minute CPU, memory, storage, and graphics baseline for CachyOS. B
 ## Features
 
 - Shell suite: 7-Zip, sysbench (CPU/memory), zstd, x264 via ffmpeg, fio, vkmark, glmark2, cyclictest
-- GUI: Run / History / Compare / What changed; live log; cancel
-- Live CPU/GPU temperatures on the Run tab (current, peak, 5-minute chart); logged to `runs/<timestamp>.temps.csv` during a run
+- GUI: Run / History / Compare / What changed; live log; cancel; dark steampunk theme, opens maximized
+- Live CPU/GPU temperature gauges on the Run tab (current, peak, 5-minute chart); logged to `runs/<timestamp>.temps.csv` during a run
 - History: tick runs (or Select all) and delete them; `results.csv` is backed up and logs move to `runs/trash/`, with **Undo last delete**
 - Sidecar `runs/<timestamp>.changes.json` (CSV schema stays stable)
 - Noise-aware better / worse / within-noise flags

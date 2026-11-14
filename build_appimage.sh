@@ -87,7 +87,7 @@ find "$APPDIR" -type f \( \
 echo "==> Ship benchmark scripts + LICENSE/version"
 cp -a "$SRC/cachy-bench.sh" "$SRC/compare.sh" "$APPDIR/usr/share/cachy-bench/"
 cp -a "$SRC/app/cachy-bench-gui.py" "$SRC/app/metrics.py" "$SRC/app/changes.py" "$SRC/app/version.py" \
-  "$SRC/app/history_ops.py" "$SRC/app/temps.py" \
+  "$SRC/app/history_ops.py" "$SRC/app/temps.py" "$SRC/app/theme.py" \
   "$APPDIR/usr/share/cachy-bench/app/"
 cp -a "$SRC/LICENSE" "$APPDIR/usr/share/cachy-bench/LICENSE"
 cp -a "$SRC/LICENSE" "$APPDIR/LICENSE"

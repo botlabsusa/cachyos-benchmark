@@ -1,4 +1,4 @@
 """CachyOS Benchmark package version (single source of truth)."""
 
-__version__ = "1.0.2"
+__version__ = "1.0.3"
 APP_NAME = "CachyOS Benchmark"

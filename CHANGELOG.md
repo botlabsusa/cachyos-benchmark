@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.0.3 — 2026-11-13
+
+- New dark steampunk theme: charcoal and gunmetal panels with riveted brass frames, brass tabs and buttons, a copper Run button, a header bar with cogs drawn in code, and themed tables, checkboxes, scrollbars, menus and dialogs
+- Live temperatures shown as analog CPU/GPU gauges: brass bezel, green/amber/red bands at 70/85 °C, needle, peak marker and a digital readout; the 5-minute trace chart is themed to match
+- Compare chart is now a horizontal bar chart with % labels; all charts use a dark theme with desaturated green (faster) and red (slower)
+- Run tab shows a small logbook summary (runs logged, baseline, latest run)
+- The window opens maximized
+- No new files or fonts are bundled (serif titles use installed fonts with fallbacks). Features and the `results.csv` columns are unchanged
+
 ## 1.0.2 — 2026-11-13
 
 - History: checkbox column, Select all / none, Delete selected (button, right-click menu or Delete key) with a confirm dialog and an extra warning for the baseline run

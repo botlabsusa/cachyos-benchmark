@@ -415,7 +415,17 @@ def cli_undo_delete() -> int:
 # GUI
 # ---------------------------------------------------------------------------
 
-def run_gui() -> int:
+def _short_path(p: Path) -> str:
+    """Show the data dir as ~/... in the UI."""
+    try:
+        return "~/" + str(Path(p).relative_to(Path.home()))
+    except ValueError:
+        return str(p)
+
+
+def run_gui(on_ready=None) -> int:
+    """Launch the GUI. on_ready(app, win) is a dev hook (screenshots); it disables the offscreen auto-quit."""
+    import theme
     from PySide6.QtCore import Qt, QProcess, QProcessEnvironment, QTimer, QSize, QThread, Signal
     from PySide6.QtGui import QColor, QFont, QAction, QDesktopServices, QKeySequence, QShortcut
     from PySide6.QtWidgets import (
@@ -457,8 +467,15 @@ def run_gui() -> int:
         from matplotlib.figure import Figure
 
         HAS_MPL = True
+        theme.apply_mpl_theme()
     except Exception:
         HAS_MPL = False
+
+    TW = theme.widgets()
+    Plate, HeaderBar, GaugeDial = TW["Plate"], TW["HeaderBar"], TW["GaugeDial"]
+    COL_GOOD = QColor(theme.C["good"])
+    COL_BAD = QColor(theme.C["bad"])
+    COL_NOISE = QColor(theme.C["noise"])
 
     class TempPoller(QThread):
         """Reads temps one at a time in a background thread (no pileups).
@@ -514,8 +531,25 @@ def run_gui() -> int:
             self._elapsed_timer.timeout.connect(self._tick_elapsed)
             self._last_finished_ts: str | None = None
 
+            root = QWidget()
+            root.setObjectName("centralRoot")
+            root_l = QVBoxLayout(root)
+            root_l.setContentsMargins(0, 0, 0, 0)
+            root_l.setSpacing(0)
+            self.header = HeaderBar(
+                APP_NAME,
+                "Performance ledger for rolling-release CachyOS",
+                f"v{__version__}  ·  BOTLABS USA",
+            )
+            root_l.addWidget(self.header)
             tabs = QTabWidget()
-            self.setCentralWidget(tabs)
+            tabs.setDocumentMode(True)
+            body = QWidget()
+            body_l = QVBoxLayout(body)
+            body_l.setContentsMargins(14, 10, 14, 12)
+            body_l.addWidget(tabs)
+            root_l.addWidget(body, stretch=1)
+            self.setCentralWidget(root)
 
             self.run_tab = QWidget()
             self.history_tab = QWidget()
@@ -567,119 +601,186 @@ def run_gui() -> int:
         # ---- Run tab ----
         def _build_run_tab(self) -> None:
             layout = QVBoxLayout(self.run_tab)
+            layout.setContentsMargins(4, 12, 4, 4)
+            layout.setSpacing(12)
 
-            title = QLabel("CachyOS Benchmark")
-            f = title.font()
-            f.setPointSize(f.pointSize() + 4)
-            f.setBold(True)
-            title.setFont(f)
-            layout.addWidget(title)
+            top = QHBoxLayout()
+            top.setSpacing(12)
+            layout.addLayout(top)
 
+            # Left: controls plate
+            ctl = Plate("Run a benchmark")
+            ctl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
             hint = QLabel(
-                f"Runs {BENCH_SCRIPT.name} (~10 min). Data → {BENCH_ROOT}"
+                f"Runs {BENCH_SCRIPT.name} (about 10 min).  Data \u2192 {_short_path(BENCH_ROOT)}"
             )
             hint.setWordWrap(True)
-            hint.setStyleSheet("color: palette(mid);")
-            layout.addWidget(hint)
+            hint.setProperty("role", "hint")
+            ctl.body.addWidget(hint)
 
             opts = QHBoxLayout()
+            opts.setSpacing(10)
             self.baseline_cb = QCheckBox("Mark as baseline")
             self.tag_edit = QLineEdit()
             self.tag_edit.setPlaceholderText("Optional tag (e.g. after-nvidia-update)")
             self.tag_edit.setClearButtonEnabled(True)
-            opts.addWidget(self.baseline_cb)
-            opts.addWidget(QLabel("Tag:"))
+            tag_lab = QLabel("Tag")
+            tag_lab.setProperty("role", "caption")
+            opts.addWidget(tag_lab)
             opts.addWidget(self.tag_edit, stretch=1)
-            layout.addLayout(opts)
+            opts.addSpacing(8)
+            opts.addWidget(self.baseline_cb)
+            ctl.body.addLayout(opts)
+            ctl.body.addSpacing(4)
+
+            self.run_btn = QPushButton("RUN BENCHMARK")
+            self.run_btn.setObjectName("runButton")
+            self.run_btn.setMinimumHeight(64)
+            self.run_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            self.run_btn.setFont(theme.display_font(15, 700))
+            self.run_btn.clicked.connect(self._on_run)
+            ctl.body.addWidget(self.run_btn)
 
             btns = QHBoxLayout()
-            self.run_btn = QPushButton("Run Benchmark")
-            self.run_btn.setMinimumHeight(48)
-            bf = self.run_btn.font()
-            bf.setPointSize(bf.pointSize() + 2)
-            bf.setBold(True)
-            self.run_btn.setFont(bf)
-            self.run_btn.clicked.connect(self._on_run)
             self.cancel_btn = QPushButton("Cancel")
+            self.cancel_btn.setProperty("kind", "danger")
             self.cancel_btn.setEnabled(False)
             self.cancel_btn.clicked.connect(self._on_cancel)
             self.open_logs_btn = QPushButton("Open logs folder")
             self.open_logs_btn.clicked.connect(self._open_logs)
-            btns.addWidget(self.run_btn, stretch=2)
-            btns.addWidget(self.cancel_btn)
-            btns.addWidget(self.open_logs_btn)
-            layout.addLayout(btns)
+            btns.addWidget(self.cancel_btn, stretch=1)
+            btns.addWidget(self.open_logs_btn, stretch=1)
+            ctl.body.addLayout(btns)
 
+            # Logbook summary (read-only; refreshed with History)
+            ctl.body.addSpacing(10)
+            stats = QHBoxLayout()
+            stats.setSpacing(12)
+            self._stat_vals = {}
+            for key, cap in (("runs", "Runs logged"), ("baseline", "Baseline"), ("latest", "Latest run")):
+                cell = QFrame()
+                cell.setStyleSheet(
+                    f"QFrame {{ background: {theme.C['bg0']}; border: 1px solid #3a2f22; border-radius: 6px; }}"
+                    "QLabel { border: none; }"
+                )
+                cl = QVBoxLayout(cell)
+                cl.setContentsMargins(12, 8, 12, 8)
+                cl.setSpacing(2)
+                c_lab = QLabel(cap.upper())
+                c_lab.setProperty("role", "caption")
+                v_lab = QLabel("\u2014")
+                v_lab.setFont(theme.mono_font(11))
+                cl.addWidget(c_lab)
+                cl.addWidget(v_lab)
+                self._stat_vals[key] = v_lab
+                stats.addWidget(cell, stretch=1)
+            ctl.body.addLayout(stats)
+
+            ctl.body.addStretch(1)
             self.status_line = QLabel("Ready.")
+            self.status_line.setWordWrap(True)
             self.elapsed_label = QLabel("")
+            self.elapsed_label.setFont(theme.mono_font(12))
+            self.elapsed_label.setStyleSheet(f"color: {theme.C['brass_hi']};")
             status_row = QHBoxLayout()
+            st_cap = QLabel("Status")
+            st_cap.setProperty("role", "caption")
+            status_row.addWidget(st_cap)
             status_row.addWidget(self.status_line, stretch=1)
             status_row.addWidget(self.elapsed_label)
-            layout.addLayout(status_row)
+            ctl.body.addLayout(status_row)
+            top.addWidget(ctl, stretch=5)
 
-            temps_box = QGroupBox("Live temperatures")
-            tb = QVBoxLayout(temps_box)
+            # Right: gauges plate
+            temps_box = Plate("Live temperatures")
+            temps_box.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+            grow = QHBoxLayout()
+            grow.setSpacing(18)
+            self.cpu_gauge = GaugeDial("CPU")
+            self.gpu_gauge = GaugeDial("GPU")
+            grow.addWidget(self.cpu_gauge)
+            grow.addWidget(self.gpu_gauge)
+            temps_box.body.addLayout(grow, stretch=1)
             trow = QHBoxLayout()
-            self.cpu_temp_label = QLabel("CPU —")
-            self.gpu_temp_label = QLabel("GPU —")
-            for lab in (self.cpu_temp_label, self.gpu_temp_label):
-                lf = lab.font()
-                lf.setPointSize(lf.pointSize() + 2)
-                lf.setBold(True)
-                lab.setFont(lf)
+            # Text readouts kept for accessibility / tooltips; gauges are the main display
+            self.cpu_temp_label = QLabel("CPU \u2014")
+            self.gpu_temp_label = QLabel("GPU \u2014")
             self.gpu_extra_label = QLabel("")
-            self.gpu_extra_label.setStyleSheet("color: palette(mid);")
+            for lab in (self.cpu_temp_label, self.gpu_temp_label, self.gpu_extra_label):
+                lab.setProperty("role", "hint")
             reset_peak = QPushButton("Reset peak")
             reset_peak.clicked.connect(self._reset_temp_peaks)
             trow.addWidget(self.cpu_temp_label)
-            trow.addSpacing(24)
+            trow.addSpacing(18)
             trow.addWidget(self.gpu_temp_label)
+            trow.addSpacing(12)
             trow.addWidget(self.gpu_extra_label)
             trow.addStretch(1)
             trow.addWidget(reset_peak)
-            tb.addLayout(trow)
+            temps_box.body.addLayout(trow)
+            top.addWidget(temps_box, stretch=6)
+
+            bottom = QSplitter(Qt.Orientation.Horizontal)
+            bottom.setChildrenCollapsible(False)
+            layout.addWidget(bottom, stretch=1)
+
+            chart_plate = Plate("Temperature trace \u2014 last 5 minutes")
             if HAS_MPL:
-                self.temp_fig = Figure(figsize=(8, 1.6), dpi=100)
+                self.temp_fig = Figure(figsize=(8, 2.2), dpi=100)
                 self.temp_canvas = FigureCanvas(self.temp_fig)
-                self.temp_canvas.setMinimumHeight(130)
-                self.temp_canvas.setMaximumHeight(190)
+                self.temp_canvas.setMinimumHeight(160)
                 self.temp_ax = self.temp_fig.add_subplot(111)
-                (self.cpu_line,) = self.temp_ax.plot([], [], color="#3b7dd8", linewidth=1.4, label="CPU")
-                (self.gpu_line,) = self.temp_ax.plot([], [], color="#2e9e5b", linewidth=1.4, label="GPU")
-                self.temp_ax.axhspan(70, 85, color="#e0a030", alpha=0.10)
-                self.temp_ax.axhspan(85, 120, color="#be3232", alpha=0.10)
+                theme.style_axes(self.temp_ax)
+                (self.cpu_line,) = self.temp_ax.plot([], [], color=theme.C["copper_hi"], linewidth=1.8, label="CPU")
+                (self.gpu_line,) = self.temp_ax.plot([], [], color=theme.C["teal_hi"], linewidth=1.8, label="GPU")
+                self.temp_ax.axhspan(70, 85, color=theme.C["amber"], alpha=0.08, linewidth=0)
+                self.temp_ax.axhspan(85, 140, color=theme.C["red"], alpha=0.10, linewidth=0)
+                self.temp_ax.axhline(70, color=theme.C["amber"], alpha=0.45, linewidth=0.8, linestyle=(0, (4, 3)))
+                self.temp_ax.axhline(85, color=theme.C["red"], alpha=0.55, linewidth=0.8, linestyle=(0, (4, 3)))
                 self.temp_ax.set_xlim(-300, 0)
                 self.temp_ax.set_ylim(20, 100)
-                self.temp_ax.set_xlabel("seconds (last 5 min)", fontsize=8)
-                self.temp_ax.set_ylabel("°C", fontsize=8)
-                self.temp_ax.tick_params(labelsize=7)
-                self.temp_ax.legend(loc="upper left", fontsize=7)
-                self.temp_fig.tight_layout()
-                tb.addWidget(self.temp_canvas)
+                self.temp_ax.set_xlabel("seconds", fontsize=8)
+                self.temp_ax.set_ylabel("\u00b0C", fontsize=8)
+                self.temp_ax.tick_params(labelsize=8)
+                self.temp_ax.legend(loc="upper left", fontsize=8, ncol=2)
+                self.temp_fig.tight_layout(pad=0.6)
+                chart_plate.body.addWidget(self.temp_canvas)
             else:
                 self.temp_fig = None
                 self.temp_canvas = None
-            layout.addWidget(temps_box)
+                lab = QLabel("Chart skipped (matplotlib unavailable).")
+                lab.setProperty("role", "hint")
+                chart_plate.body.addWidget(lab)
+            bottom.addWidget(chart_plate)
 
+            log_plate = Plate("Console")
             self.log_pane = QPlainTextEdit()
+            self.log_pane.setObjectName("console")
             self.log_pane.setReadOnly(True)
-            mono = QFont("monospace")
-            mono.setStyleHint(QFont.StyleHint.Monospace)
-            mono.setPointSize(mono.pointSize())
-            self.log_pane.setFont(mono)
+            self.log_pane.setFont(theme.mono_font())
             self.log_pane.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
-            layout.addWidget(self.log_pane, stretch=1)
+            self.log_pane.setPlaceholderText("Benchmark output appears here.")
+            log_plate.body.addWidget(self.log_pane)
+            bottom.addWidget(log_plate)
+            bottom.setSizes([3000, 2000])
 
         # ---- History tab ----
         def _build_history_tab(self) -> None:
-            layout = QVBoxLayout(self.history_tab)
+            outer = QVBoxLayout(self.history_tab)
+            outer.setContentsMargins(4, 12, 4, 4)
+            plate = Plate("Run ledger \u2014 results.csv")
+            outer.addWidget(plate)
+            layout = plate.body
             top = QHBoxLayout()
-            top.addWidget(QLabel("All runs from results.csv"))
+            hl = QLabel("All runs, newest first. Tick runs to delete, or pick one as the baseline.")
+            hl.setProperty("role", "hint")
+            top.addWidget(hl)
             top.addStretch(1)
             refresh = QPushButton("Refresh")
             refresh.clicked.connect(self._refresh_history)
             top.addWidget(refresh)
             set_bl = QPushButton("Set selected as baseline")
+            set_bl.setProperty("kind", "brass")
             set_bl.clicked.connect(self._set_selected_baseline)
             top.addWidget(set_bl)
             layout.addLayout(top)
@@ -688,6 +789,7 @@ def run_gui() -> int:
             self.sel_all_btn = QPushButton("Select all / none")
             self.sel_all_btn.clicked.connect(self._toggle_select_all)
             self.del_btn = QPushButton("Delete selected")
+            self.del_btn.setProperty("kind", "danger")
             self.del_btn.clicked.connect(self._delete_selected)
             self.undo_btn = QPushButton("Undo last delete")
             self.undo_btn.clicked.connect(self._undo_delete)
@@ -713,13 +815,16 @@ def run_gui() -> int:
             )
             self.hist_table.horizontalHeader().setStretchLastSection(True)
             self.hist_table.verticalHeader().setVisible(False)
+            self.hist_table.setAlternatingRowColors(True)
+            self.hist_table.setShowGrid(False)
+            self.hist_table.verticalHeader().setDefaultSectionSize(34)
             self.hist_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
             self.hist_table.customContextMenuRequested.connect(self._history_menu)
             self.hist_table.itemChanged.connect(lambda *_: self._update_sel_count())
             del_sc = QShortcut(QKeySequence(QKeySequence.StandardKey.Delete), self.hist_table)
             del_sc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
             del_sc.activated.connect(self._delete_selected)
-            layout.addWidget(self.hist_table)
+            layout.addWidget(self.hist_table, stretch=1)
             hint = QLabel(
                 "Tick runs (or select rows) and press Delete. results.csv is backed up first "
                 "and logs move to runs/trash/, so Undo can put them back."
@@ -730,27 +835,42 @@ def run_gui() -> int:
 
         # ---- Compare tab ----
         def _build_compare_tab(self) -> None:
-            layout = QVBoxLayout(self.compare_tab)
+            outer = QVBoxLayout(self.compare_tab)
+            outer.setContentsMargins(4, 12, 4, 4)
+            outer.setSpacing(12)
+            sel_plate = Plate("Select two runs")
+            outer.addWidget(sel_plate)
+            layout = sel_plate.body
             pick = QHBoxLayout()
-            pick.addWidget(QLabel("A (baseline):"))
+            pick.setSpacing(10)
+            cap_a = QLabel("A  baseline")
+            cap_a.setProperty("role", "caption")
+            pick.addWidget(cap_a)
             self.combo_a = QComboBox()
             self.combo_a.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
             pick.addWidget(self.combo_a, stretch=1)
-            pick.addWidget(QLabel("B (compare):"))
+            pick.addSpacing(8)
+            cap_b = QLabel("B  compare")
+            cap_b.setProperty("role", "caption")
+            pick.addWidget(cap_b)
             self.combo_b = QComboBox()
             self.combo_b.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
             pick.addWidget(self.combo_b, stretch=1)
             go = QPushButton("Compare")
+            go.setProperty("kind", "brass")
+            go.setMinimumWidth(130)
             go.clicked.connect(self._do_compare)
             pick.addWidget(go)
             layout.addLayout(pick)
 
             self.compare_meta = QLabel("")
             self.compare_meta.setWordWrap(True)
+            self.compare_meta.setProperty("role", "meta")
             layout.addWidget(self.compare_meta)
 
-            splitter = QSplitter(Qt.Orientation.Vertical)
-            layout.addWidget(splitter, stretch=1)
+            splitter = QSplitter(Qt.Orientation.Horizontal)
+            splitter.setChildrenCollapsible(False)
+            outer.addWidget(splitter, stretch=1)
 
             self.compare_table = QTableWidget(0, 5)
             self.compare_table.setHorizontalHeaderLabels(
@@ -765,13 +885,17 @@ def run_gui() -> int:
                     i, QHeaderView.ResizeMode.ResizeToContents
                 )
             self.compare_table.verticalHeader().setVisible(False)
-            splitter.addWidget(self.compare_table)
+            self.compare_table.setAlternatingRowColors(True)
+            self.compare_table.setShowGrid(False)
+            self.compare_table.verticalHeader().setDefaultSectionSize(32)
+            tplate = Plate("All metrics, noise-aware")
+            tplate.body.addWidget(self.compare_table)
+            splitter.addWidget(tplate)
 
-            self.chart_container = QWidget()
-            self.chart_layout = QVBoxLayout(self.chart_container)
-            self.chart_layout.setContentsMargins(0, 0, 0, 0)
+            self.chart_container = Plate("Change vs A  (better \u2192 right)")
+            self.chart_layout = self.chart_container.body
             if HAS_MPL:
-                self.figure = Figure(figsize=(8, 2.8), dpi=100)
+                self.figure = Figure(figsize=(6, 6), dpi=100)
                 self.canvas = FigureCanvas(self.figure)
                 self.chart_layout.addWidget(self.canvas)
             else:
@@ -781,7 +905,7 @@ def run_gui() -> int:
                 lab.setStyleSheet("color: palette(mid);")
                 self.chart_layout.addWidget(lab)
             splitter.addWidget(self.chart_container)
-            splitter.setSizes([400, 220])
+            splitter.setSizes([5000, 4000])
 
             self.combo_a.currentIndexChanged.connect(lambda *_: None)
             # Auto-compare when both populated via refresh
@@ -789,14 +913,20 @@ def run_gui() -> int:
 
         # ---- What changed tab ----
         def _build_changed_tab(self) -> None:
-            layout = QVBoxLayout(self.changed_tab)
+            outer = QVBoxLayout(self.changed_tab)
+            outer.setContentsMargins(4, 12, 4, 4)
+            outer.setSpacing(12)
+            sum_plate = Plate("Latest run")
+            outer.addWidget(sum_plate)
+            layout = sum_plate.body
             top = QHBoxLayout()
-            top.addWidget(
-                QLabel(
-                    f"Latest vs previous comparable run, and vs baseline {active_baseline_ts() or '(mark a run with --baseline)'}. "
-                    "Red/green only when change exceeds estimated noise."
-                )
+            intro = QLabel(
+                f"Latest vs previous comparable run, and vs baseline {active_baseline_ts() or '(mark a run with --baseline)'}. "
+                "Red/green only when change exceeds estimated noise."
             )
+            intro.setProperty("role", "hint")
+            intro.setWordWrap(True)
+            top.addWidget(intro, stretch=1)
             top.addStretch(1)
             refresh = QPushButton("Refresh")
             refresh.clicked.connect(self._refresh_what_changed)
@@ -805,6 +935,7 @@ def run_gui() -> int:
 
             self.changed_meta = QLabel("")
             self.changed_meta.setWordWrap(True)
+            self.changed_meta.setProperty("role", "meta")
             layout.addWidget(self.changed_meta)
 
             self.changed_hot = QLabel("")
@@ -813,20 +944,20 @@ def run_gui() -> int:
 
             self.changed_pkgs = QPlainTextEdit()
             self.changed_pkgs.setReadOnly(True)
-            self.changed_pkgs.setMaximumHeight(160)
-            mono = QFont("monospace")
-            mono.setStyleHint(QFont.StyleHint.Monospace)
-            self.changed_pkgs.setFont(mono)
-            layout.addWidget(QLabel("Package changes (pacman.log since previous run)"))
-            layout.addWidget(self.changed_pkgs)
+            self.changed_pkgs.setMinimumHeight(110)
+            self.changed_pkgs.setMaximumHeight(150)
+            self.changed_pkgs.setObjectName("console")
+            self.changed_pkgs.setFont(theme.mono_font())
+            pkg_plate = Plate("Package changes \u2014 pacman.log since previous run")
+            pkg_plate.body.addWidget(self.changed_pkgs)
+            outer.addWidget(pkg_plate)
 
             splitter = QSplitter(Qt.Orientation.Horizontal)
-            layout.addWidget(splitter, stretch=1)
+            splitter.setChildrenCollapsible(False)
+            outer.addWidget(splitter, stretch=1)
 
-            left = QWidget()
-            left_l = QVBoxLayout(left)
-            left_l.setContentsMargins(0, 0, 0, 0)
-            left_l.addWidget(QLabel("All metrics vs previous (noise-aware)"))
+            left = Plate("Vs previous run")
+            left_l = left.body
             self.changed_prev_table = QTableWidget(0, 5)
             self.changed_prev_table.setHorizontalHeaderLabels(
                 ["Metric", "Prev", "Latest", "Change", "Note"]
@@ -835,14 +966,19 @@ def run_gui() -> int:
             self.changed_prev_table.horizontalHeader().setSectionResizeMode(
                 0, QHeaderView.ResizeMode.Stretch
             )
+            for i in range(1, 5):
+                self.changed_prev_table.horizontalHeader().setSectionResizeMode(
+                    i, QHeaderView.ResizeMode.ResizeToContents
+                )
             self.changed_prev_table.verticalHeader().setVisible(False)
+            self.changed_prev_table.setAlternatingRowColors(True)
+            self.changed_prev_table.setShowGrid(False)
+            self.changed_prev_table.verticalHeader().setDefaultSectionSize(30)
             left_l.addWidget(self.changed_prev_table)
             splitter.addWidget(left)
 
-            right = QWidget()
-            right_l = QVBoxLayout(right)
-            right_l.setContentsMargins(0, 0, 0, 0)
-            right_l.addWidget(QLabel(f"All metrics vs baseline {active_baseline_ts() or '(none set)'}"))
+            right = Plate(f"Vs baseline {active_baseline_ts() or '(none set)'}")
+            right_l = right.body
             self.changed_base_table = QTableWidget(0, 5)
             self.changed_base_table.setHorizontalHeaderLabels(
                 ["Metric", "Base", "Latest", "Change", "Note"]
@@ -851,19 +987,24 @@ def run_gui() -> int:
             self.changed_base_table.horizontalHeader().setSectionResizeMode(
                 0, QHeaderView.ResizeMode.Stretch
             )
+            for i in range(1, 5):
+                self.changed_base_table.horizontalHeader().setSectionResizeMode(
+                    i, QHeaderView.ResizeMode.ResizeToContents
+                )
             self.changed_base_table.verticalHeader().setVisible(False)
+            self.changed_base_table.setAlternatingRowColors(True)
+            self.changed_base_table.setShowGrid(False)
+            self.changed_base_table.verticalHeader().setDefaultSectionSize(30)
             right_l.addWidget(self.changed_base_table)
             splitter.addWidget(right)
 
             self.changed_notes = QLabel("")
             self.changed_notes.setWordWrap(True)
             self.changed_notes.setStyleSheet("color: palette(mid);")
-            layout.addWidget(self.changed_notes)
+            outer.addWidget(self.changed_notes)
 
         def _fill_moved_table(self, table: QTableWidget, block: dict) -> None:
-            green = QColor(30, 140, 70)
-            red = QColor(190, 50, 50)
-            grey = QColor(120, 120, 120)
+            green, red, grey = COL_GOOD, COL_BAD, COL_NOISE
             table.setRowCount(0)
             metrics = block.get("metrics") or []
             order = {"better": 0, "worse": 1, "within_noise": 2, "new": 3, "n/a": 4}
@@ -922,7 +1063,7 @@ def run_gui() -> int:
                     + extra
                 )
                 if hot.get("warned"):
-                    self.changed_hot.setStyleSheet("color: #be3232; font-weight: bold;")
+                    self.changed_hot.setStyleSheet(f"color: {theme.C['bad']}; font-weight: bold;")
                 else:
                     self.changed_hot.setStyleSheet("color: palette(mid);")
             else:
@@ -1207,6 +1348,7 @@ def run_gui() -> int:
                         item.setData(Qt.ItemDataRole.UserRole, r.get("timestamp"))
                     # Numeric sort for score cols
                     if col >= 7:
+                        item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
                         num = parse_num(val if val != "—" else None)
                         if num is not None:
                             item.setData(Qt.ItemDataRole.UserRole, num)
@@ -1214,6 +1356,10 @@ def run_gui() -> int:
             self.hist_table.setSortingEnabled(True)
             self.hist_table.blockSignals(False)
             self._update_sel_count()
+            if hasattr(self, "_stat_vals"):
+                self._stat_vals["runs"].setText(str(len(rows)))
+                self._stat_vals["baseline"].setText(bl or "\u2014")
+                self._stat_vals["latest"].setText((rows[-1].get("timestamp") or "\u2014") if rows else "\u2014")
 
         def _set_selected_baseline(self) -> None:
             items = self.hist_table.selectedItems()
@@ -1382,12 +1528,15 @@ def run_gui() -> int:
         def _reset_temp_peaks(self) -> None:
             self._peak_cpu = None
             self._peak_gpu = None
+            if hasattr(self, "cpu_gauge"):
+                self.cpu_gauge.set_reading(self.cpu_gauge.value(), None)
+                self.gpu_gauge.set_reading(self.gpu_gauge.value(), None)
 
         def _style_for(self, t: float | None) -> str:
             return {
-                "green": "color: #1e8c46;",
-                "amber": "color: #d08a00;",
-                "red": "color: #be3232;",
+                "green": f"color: {theme.C['good']};",
+                "amber": f"color: {theme.C['amber']};",
+                "red": f"color: {theme.C['red']};",
             }.get(temp_level(t), "color: palette(mid);")
 
         def _on_temp_sample(self, s) -> None:
@@ -1407,12 +1556,15 @@ def run_gui() -> int:
                 return "—" if v is None else f"{v:.0f}°C"
             if s.cpu_c is None and "missing" in (s.cpu_source or ""):
                 self.cpu_temp_label.setText("CPU — (install lm_sensors)")
+                self.cpu_gauge.set_reading(None, self._peak_cpu, note="INSTALL LM_SENSORS")
             else:
                 self.cpu_temp_label.setText(f"CPU {fmt(s.cpu_c)}  (peak {fmt(self._peak_cpu)})")
+                self.cpu_gauge.set_reading(s.cpu_c, self._peak_cpu)
             self.cpu_temp_label.setStyleSheet(self._style_for(s.cpu_c))
             if s.gpu_source == "no nvidia-smi":
                 self.gpu_temp_label.setText("GPU — (no nvidia-smi)")
                 self.gpu_extra_label.setText("")
+                self.gpu_gauge.set_reading(None, self._peak_gpu, note="NO NVIDIA-SMI")
             else:
                 self.gpu_temp_label.setText(f"GPU {fmt(s.gpu_c)}  (peak {fmt(self._peak_gpu)})")
                 bits = []
@@ -1421,6 +1573,7 @@ def run_gui() -> int:
                 if s.gpu_power_w is not None:
                     bits.append(f"{s.gpu_power_w:.0f} W")
                 self.gpu_extra_label.setText("  ".join(bits))
+                self.gpu_gauge.set_reading(s.gpu_c, self._peak_gpu, extra="   ".join(bits).upper())
             self.gpu_temp_label.setStyleSheet(self._style_for(s.gpu_c))
             if self.temp_canvas is not None and self._tabs.currentWidget() is self.run_tab:
                 self._redraw_temp_chart(s.t)
@@ -1523,9 +1676,7 @@ def run_gui() -> int:
                 f"kernel={b.get('kernel')}  nvidia={b.get('nvidia_driver')}  plasma={b.get('plasma')}"
             )
 
-            green = QColor(30, 140, 70)
-            red = QColor(190, 50, 50)
-            muted = QColor(120, 120, 120)
+            green, red, muted = COL_GOOD, COL_BAD, COL_NOISE
 
             self.compare_table.setRowCount(0)
             chart_labels: list[str] = []
@@ -1612,25 +1763,37 @@ def run_gui() -> int:
                         display = -c if key in LIB else c
                         chart_labels.append(short)
                         chart_vals.append(display)
+                        good, bad = theme.C["good"], theme.C["bad"]
                         if d.verdict == "within_noise":
-                            chart_colors.append("#888888")
+                            chart_colors.append(theme.C["noise"])
                         elif d.verdict == "better":
-                            chart_colors.append("#1e8c46")
+                            chart_colors.append(good)
                         elif d.verdict == "worse":
-                            chart_colors.append("#be3232")
+                            chart_colors.append(bad)
                         else:
                             improved = bool(av is not None and bv is not None and is_improved(key, av, bv))
-                            chart_colors.append("#1e8c46" if improved else "#be3232")
+                            chart_colors.append(good if improved else bad)
 
             if self.figure is not None:
                 self.figure.clear()
                 if chart_labels:
                     ax = self.figure.add_subplot(111)
-                    ax.bar(chart_labels, chart_vals, color=chart_colors)
-                    ax.axhline(0, color="#888", linewidth=0.8)
-                    ax.set_ylabel("% vs A (better → +)")
-                    ax.tick_params(axis="x", labelrotation=45)
-                    self.figure.tight_layout()
+                    theme.style_axes(ax)
+                    ys = list(range(len(chart_labels)))[::-1]
+                    ax.barh(ys, chart_vals, color=chart_colors, height=0.66,
+                            edgecolor=theme.C["bg0"], linewidth=0.6)
+                    ax.set_yticks(ys, chart_labels)
+                    ax.axvline(0, color=theme.C["brass"], linewidth=1.0)
+                    ax.grid(axis="y", visible=False)
+                    ax.set_xlabel("% vs A   (better \u2192 +)", fontsize=9)
+                    ax.tick_params(labelsize=9)
+                    lim = max([abs(v) for v in chart_vals] + [1.0]) * 1.28
+                    ax.set_xlim(-lim, lim)
+                    for y, v in zip(ys, chart_vals):
+                        ax.text(v + (lim * 0.02 if v >= 0 else -lim * 0.02), y, f"{v:+.1f}%",
+                                va="center", ha="left" if v >= 0 else "right",
+                                fontsize=8, color=theme.C["text"])
+                    self.figure.tight_layout(pad=0.8)
                 self.canvas.draw_idle()
 
         def _show_about(self) -> None:
@@ -1676,11 +1839,14 @@ def run_gui() -> int:
     app.setApplicationName(APP_NAME)
     app.setApplicationVersion(__version__)
     app.setDesktopFileName("cachy-bench")
+    theme.apply_app_theme(app)
     win = MainWindow()
-    win.show()
+    win.showMaximized()
     app.aboutToQuit.connect(lambda: (win._temp_poller.stop(), win._temp_poller.wait(3000)))
-    # If offscreen, auto-quit after a moment for CI-style smoke
-    if os.environ.get("QT_QPA_PLATFORM") == "offscreen":
+    if on_ready is not None:
+        QTimer.singleShot(0, lambda: on_ready(app, win))
+    elif os.environ.get("QT_QPA_PLATFORM") == "offscreen":
+        # If offscreen, auto-quit after a moment for CI-style smoke
         QTimer.singleShot(800, app.quit)
     return app.exec()
 
