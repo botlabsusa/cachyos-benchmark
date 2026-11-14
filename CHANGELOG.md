@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.4 — 2026-11-13
+
+- New app icon: the brass and copper cogs from the header bar, on a dark plate with a thin brass rim. Used for the window, the AppImage, the menu/desktop launcher and the project page (SVG plus PNGs from 16 to 512 px, with simplified cogs at 16–32 px so they stay readable)
+- Icon sources and generator live in `assets/icon/` (favicon, apple-touch icon and a GitHub social preview too)
+- Release files: the gauges close-up screenshot no longer has a thin black bar on its right edge, and `SHA256SUMS` lists only the version being released
+
 ## 1.0.3 — 2026-11-13
 
 - New dark steampunk theme: charcoal and gunmetal panels with riveted brass frames, brass tabs and buttons, a copper Run button, a header bar with cogs drawn in code, and themed tables, checkboxes, scrollbars, menus and dialogs

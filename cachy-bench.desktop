@@ -9,4 +9,4 @@ Categories=System;Utility;
 Terminal=false
 StartupNotify=true
 StartupWMClass=CachyOS Benchmark
-X-AppImage-Version=1.0.0
+X-AppImage-Version=1.0.4

@@ -97,30 +97,21 @@ chmod +x "$APPDIR/usr/share/cachy-bench/cachy-bench.sh" \
          "$APPDIR/usr/share/cachy-bench/app/cachy-bench-gui.py"
 
 echo "==> Icon"
-ICON_SRC="${ROOT}/cachy-bench.png"
-if [ -f "$ICON_SRC" ]; then
-  cp -a "$ICON_SRC" "$APPDIR/cachy-bench.png"
-  cp -a "$ICON_SRC" "$APPDIR/usr/share/icons/hicolor/256x256/apps/cachy-bench.png"
-else
-  "$VENV/bin/python" - "$APPDIR" <<'PY'
-from pathlib import Path
-import sys
-root = Path(sys.argv[1])
-try:
-    from PIL import Image, ImageDraw
-    img = Image.new("RGBA", (256, 256), (20, 30, 48, 255))
-    d = ImageDraw.Draw(img)
-    d.rounded_rectangle((32, 32, 224, 224), radius=32, fill=(30, 120, 80, 255))
-    d.rectangle((70, 150, 100, 200), fill=(230, 230, 230, 255))
-    d.rectangle((110, 110, 140, 200), fill=(230, 230, 230, 255))
-    d.rectangle((150, 70, 180, 200), fill=(230, 230, 230, 255))
-    img.save(root / "cachy-bench.png")
-    img.save(root / "usr/share/icons/hicolor/256x256/apps/cachy-bench.png")
-    print("icon generated")
-except Exception as e:
-    print("icon skip", e)
-PY
+# Brass + copper cogs (assets/icon, regenerate with assets/icon/make_icons.py).
+ICON_DIR="${ROOT}/assets/icon"
+if [ ! -f "${ICON_DIR}/png/cachy-bench-plate-256.png" ]; then
+  echo "Missing ${ICON_DIR}/png; run: QT_QPA_PLATFORM=offscreen ${VENV}/bin/python ${ICON_DIR}/make_icons.py" >&2
+  exit 1
 fi
+mkdir -p "$APPDIR/usr/share/cachy-bench/icons" "$APPDIR/usr/share/icons/hicolor/scalable/apps"
+for s in 16 24 32 48 64 128 256 512; do
+  mkdir -p "$APPDIR/usr/share/icons/hicolor/${s}x${s}/apps"
+  cp -a "${ICON_DIR}/png/cachy-bench-plate-${s}.png" "$APPDIR/usr/share/icons/hicolor/${s}x${s}/apps/cachy-bench.png"
+  cp -a "${ICON_DIR}/png/cachy-bench-plate-${s}.png" "$APPDIR/usr/share/cachy-bench/icons/"
+done
+cp -a "${ICON_DIR}/icon-plate.svg" "$APPDIR/usr/share/icons/hicolor/scalable/apps/cachy-bench.svg"
+cp -a "${ICON_DIR}/png/cachy-bench-plate-256.png" "$APPDIR/cachy-bench.png"
+ln -sf cachy-bench.png "$APPDIR/.DirIcon"
 
 cat > "$APPDIR/cachy-bench.desktop" << DESK
 [Desktop Entry]

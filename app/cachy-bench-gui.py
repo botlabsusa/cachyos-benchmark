@@ -49,6 +49,32 @@ def resolve_layout() -> tuple[Path, Path, Path]:
 
 BENCH_ROOT, APP_SHARE, BENCH_SCRIPT = resolve_layout()
 
+
+ICON_SIZES = (16, 24, 32, 48, 64, 128, 256, 512)
+
+
+def icon_dir() -> Path | None:
+    """Folder with cachy-bench-plate-<size>.png (AppImage share dir or repo assets)."""
+    for d in (APP_SHARE / "icons", APP_DIR.parent / "assets" / "icon" / "png"):
+        if (d / "cachy-bench-plate-256.png").is_file():
+            return d
+    return None
+
+
+def app_icon():
+    """QIcon built from the bundled PNGs; falls back to the theme icon name."""
+    from PySide6.QtGui import QIcon
+
+    d = icon_dir()
+    if d is None:
+        return QIcon.fromTheme("cachy-bench")
+    ic = QIcon()
+    for size in ICON_SIZES:
+        f = d / f"cachy-bench-plate-{size}.png"
+        if f.is_file():
+            ic.addFile(str(f))
+    return ic
+
 from version import APP_NAME, __version__  # noqa: E402
 
 from metrics import (  # noqa: E402
@@ -278,6 +304,10 @@ def selftest() -> int:
     print(f"app_share={APP_SHARE}")
     print(f"bench_script_exists={BENCH_SCRIPT.is_file()} csv_exists={CSV_PATH.is_file()}")
     print(f"what_changed_latest={((report.get('latest') or {}).get('timestamp'))}")
+    idir = icon_dir()
+    missing = [n for n in ICON_SIZES if idir is None or not (idir / f"cachy-bench-plate-{n}.png").is_file()]
+    assert not missing, f"icon PNGs missing: {missing}"
+    print(f"icons OK ({len(ICON_SIZES)} sizes)")
     return 0
 
 
@@ -1839,6 +1869,7 @@ def run_gui(on_ready=None) -> int:
     app.setApplicationName(APP_NAME)
     app.setApplicationVersion(__version__)
     app.setDesktopFileName("cachy-bench")
+    app.setWindowIcon(app_icon())
     theme.apply_app_theme(app)
     win = MainWindow()
     win.showMaximized()

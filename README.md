@@ -1,4 +1,4 @@
-# CachyOS Benchmark
+<h1><img src="assets/icon/png/cachy-bench-plate-64.png" width="48" height="48" alt="" align="absmiddle"> CachyOS Benchmark</h1>
 
 [![Support on Patreon](https://img.shields.io/badge/Patreon-Support%20Botlabs-F96854?logo=patreon&logoColor=white)](https://www.patreon.com/botlabs)
 
