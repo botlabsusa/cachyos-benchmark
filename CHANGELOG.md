@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.0.2 — 2026-11-13
+
+- History: checkbox column, Select all / none, Delete selected (button, right-click menu or Delete key) with a confirm dialog and an extra warning for the baseline run
+- Deletes are reversible: `results.csv` is backed up to `results.csv.bak-<timestamp>`, run logs/sidecars move to `runs/trash/`, and **Undo last delete** puts them back
+- Live CPU (lm_sensors) and GPU (nvidia-smi) temperatures on the Run tab: current value, peak, green/amber/red, 5-minute chart; saved to `runs/<timestamp>.temps.csv` during runs
+- New CLI: `--delete-runs TS[,TS...]`, `--undo-delete`, `--temps-once`; `--selftest` covers delete/undo and temperature parsing
+
 ## 1.0.1 — 2026-11-01
 
 - Added support contact (`support@botlabsusa.com`) in README and About

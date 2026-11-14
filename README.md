@@ -8,6 +8,8 @@ Repeatable ~10-minute CPU, memory, storage, and graphics baseline for CachyOS. B
 
 - Shell suite: 7-Zip, sysbench (CPU/memory), zstd, x264 via ffmpeg, fio, vkmark, glmark2, cyclictest
 - GUI: Run / History / Compare / What changed; live log; cancel
+- Live CPU/GPU temperatures on the Run tab (current, peak, 5-minute chart); logged to `runs/<timestamp>.temps.csv` during a run
+- History: tick runs (or Select all) and delete them; `results.csv` is backed up and logs move to `runs/trash/`, with **Undo last delete**
 - Sidecar `runs/<timestamp>.changes.json` (CSV schema stays stable)
 - Noise-aware better / worse / within-noise flags
 - Hot-start CPU/GPU temperature warning and optional `--cooldown`
@@ -45,6 +47,9 @@ Useful flags and modes:
 | `--check-deps` | GUI/CLI: list missing host tools + pacman install line |
 | `--selftest` | GUI: quick metrics / what-changed sanity check |
 | `--what-changed` | GUI/CLI: print what-changed report |
+| `--delete-runs TS[,TS...]` | GUI/CLI: remove runs (backs up `results.csv`, moves logs to `runs/trash/`); add `--yes` to skip the prompt, `--allow-baseline` to include the baseline |
+| `--undo-delete` | GUI/CLI: undo the last delete |
+| `--temps-once` | GUI/CLI: print one CPU/GPU temperature reading |
 | `--version` | Print app version |
 | `--run` | AppImage: skip GUI and run `cachy-bench.sh` |
 | `--only LIST` | Comma-separated subset of workloads |

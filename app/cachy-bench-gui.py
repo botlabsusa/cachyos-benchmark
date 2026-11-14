@@ -7,6 +7,10 @@ Usage:
   cachy-bench-gui.py --selftest      # parse CSV / metrics / changes, exit 0
   cachy-bench-gui.py --check-deps    # list missing tools + pacman line
   cachy-bench-gui.py --what-changed  # headless 'What changed' report
+  cachy-bench-gui.py --delete-runs TS[,TS...] [--yes] [--allow-baseline]
+                                     # remove runs (backs up results.csv, moves logs to runs/trash/)
+  cachy-bench-gui.py --undo-delete   # undo the last delete
+  cachy-bench-gui.py --temps-once    # print one CPU/GPU temperature reading
 
 Env:
   CACHY_BENCH_DATA  data dir (results.csv, runs/, tmp/); default ~/bench
@@ -68,6 +72,16 @@ from changes import (  # noqa: E402
     read_start_temps,
     resolve_baseline_ts,
     tag_excluded,
+)
+from history_ops import delete_runs, last_delete, plan_delete, undo_last_delete  # noqa: E402
+from temps import (  # noqa: E402
+    TEMPS_CSV_HEADER,
+    format_sample,
+    parse_nvidia_smi,
+    parse_sensors_json,
+    read_temps,
+    temp_level,
+    temps_csv_line,
 )
 
 CSV_PATH = BENCH_ROOT / "results.csv"
@@ -257,10 +271,143 @@ def selftest() -> int:
     ]
     report = build_what_changed(sample, baseline_ts=base_ts, runs_dir=RUNS_DIR)
     assert "vs_previous" in report and "vs_baseline" in report, report.keys()
+    _selftest_temps()
+    hist_note = _selftest_history()
     print(f"selftest OK — metrics={len(METRICS)} rows={len(rows)} bench_root={BENCH_ROOT}")
+    print(f"temps parse OK; history delete/undo OK ({hist_note})")
     print(f"app_share={APP_SHARE}")
     print(f"bench_script_exists={BENCH_SCRIPT.is_file()} csv_exists={CSV_PATH.is_file()}")
     print(f"what_changed_latest={((report.get('latest') or {}).get('timestamp'))}")
+    return 0
+
+
+def _selftest_temps() -> None:
+    sj = (
+        '{"coretemp-isa-0000": {"Adapter": "ISA adapter",'
+        ' "Package id 0": {"temp1_input": 47.0, "temp1_max": 80.0},'
+        ' "Core 0": {"temp2_input": 44.0}, "Core 4": {"temp6_input": 52.0}},'
+        ' "nvme-pci-0100": {"Composite": {"temp1_input": 39.9}}}'
+    )
+    assert parse_sensors_json(sj) == 47.0
+    no_pkg = '{"coretemp-isa-0000": {"Core 0": {"temp2_input": 44.0}, "Core 1": {"temp3_input": 58.0}}}'
+    assert parse_sensors_json(no_pkg) == 58.0
+    assert parse_sensors_json('{"k10temp-pci-00c3": {"Tctl": {"temp1_input": 61.5}}}') == 61.5
+    assert parse_sensors_json("not json") is None
+    assert parse_sensors_json("{}") is None
+    assert parse_nvidia_smi("45, 3, 25.10\n") == (45.0, 3.0, 25.1)
+    assert parse_nvidia_smi("51, 0, [N/A]") == (51.0, 0.0, None)
+    assert parse_nvidia_smi("") == (None, None, None)
+    assert temp_level(None) == "none" and temp_level(69.9) == "green"
+    assert temp_level(70) == "amber" and temp_level(85) == "amber" and temp_level(85.1) == "red"
+
+
+def _selftest_history() -> str:
+    """Delete/undo round trip in a throwaway dir; never touches the real data dir."""
+    import hashlib
+    import tempfile
+
+    def sha(p: Path) -> str:
+        return hashlib.sha256(p.read_bytes()).hexdigest()
+
+    notes = []
+    with tempfile.TemporaryDirectory(prefix="cachybench-selftest-") as td:
+        d = Path(td) / "data"
+        (d / "runs").mkdir(parents=True)
+        hdr = '"timestamp","tag","vkmark","log_file"\n'
+        lines = [hdr]
+        for i, ts in enumerate(["20200101-000001", "20200101-000002", "20200101-000003"]):
+            lines.append(f'"{ts}","t{i}","{1000 + i}","{d}/runs/{ts}-t{i}.log"\n')
+            (d / "runs" / f"{ts}-t{i}.log").write_text("log\n")
+            (d / "runs" / f"{ts}.changes.json").write_text("{}\n")
+        (d / "runs" / "20200101-000002.temps.csv").write_text(TEMPS_CSV_HEADER)
+        csvp = d / "results.csv"
+        csvp.write_text("".join(lines))
+        orig = sha(csvp)
+        res = delete_runs(d, ["20200101-000002", "20200101-000003", "nope"])
+        assert res["removed"] == ["20200101-000002", "20200101-000003"], res
+        assert res["missing"] == ["nope"], res
+        assert Path(res["backup"]).is_file() and sha(Path(res["backup"])) == orig
+        assert Path(res["backup"]).name.startswith("results.csv.bak-")
+        with csvp.open(newline="") as f:
+            left = [r["timestamp"] for r in csv.DictReader(f)]
+        assert left == ["20200101-000001"], left
+        assert len(res["moved"]) == 5, res["moved"]
+        assert all(Path(dst).parent == d / "runs" / "trash" for _, dst in res["moved"])
+        assert not (d / "runs" / "20200101-000002.temps.csv").exists()
+        assert (d / "runs" / "20200101-000001.changes.json").is_file()
+        assert last_delete(d) is not None
+        u = undo_last_delete(d)
+        assert u and len(u["restored_files"]) == 5, u
+        assert sha(csvp) == orig, "undo did not restore results.csv byte-for-byte"
+        assert (d / "runs" / "20200101-000003-t2.log").is_file()
+        assert last_delete(d) is None
+        # Undo with a run added after the delete keeps the new run
+        delete_runs(d, ["20200101-000001"])
+        with csvp.open("a") as f:
+            f.write(f'"20200101-000009","new","1","{d}/runs/x.log"\n')
+        u = undo_last_delete(d)
+        assert u["kept_new_rows"] == 1, u
+        with csvp.open(newline="") as f:
+            got = [r["timestamp"] for r in csv.DictReader(f)]
+        assert got[:3] == ["20200101-000001", "20200101-000002", "20200101-000003"], got
+        assert got[-1] == "20200101-000009", got
+        notes.append("fixture")
+        # Round trip on a COPY of the real data (read-only for the real dir)
+        if CSV_PATH.is_file():
+            c = Path(td) / "copy"
+            (c / "runs").mkdir(parents=True)
+            shutil.copy2(CSV_PATH, c / "results.csv")
+            with (c / "results.csv").open(newline="") as f:
+                real_rows = list(csv.DictReader(f))
+            if real_rows:
+                before = sha(c / "results.csv")
+                r = delete_runs(c, [real_rows[-1]["timestamp"]])
+                assert r["removed"] == [real_rows[-1]["timestamp"]]
+                undo_last_delete(c)
+                assert sha(c / "results.csv") == before
+                notes.append(f"copy of {len(real_rows)} real rows")
+    return ", ".join(notes)
+
+
+def cli_delete_runs(arg: str, assume_yes: bool, allow_baseline: bool) -> int:
+    ts_list = [t.strip() for t in arg.split(",") if t.strip()]
+    if not ts_list:
+        print("--delete-runs needs TS[,TS...]", file=sys.stderr)
+        return 2
+    plan = plan_delete(BENCH_ROOT, ts_list)
+    for t in plan["missing"]:
+        print(f"not found: {t}")
+    if not plan["found"]:
+        print("Nothing to delete.")
+        return 1
+    bl = active_baseline_ts() or baseline_timestamp(load_rows())
+    if bl and bl in plan["found"] and not allow_baseline:
+        print(f"Refusing: {bl} is the baseline run. Add --allow-baseline to delete it anyway.")
+        return 3
+    print(f"Will remove {len(plan['found'])} run(s) from {CSV_PATH}: {', '.join(plan['found'])}")
+    print(f"Moves {len(plan['files'])} run file(s) to {RUNS_DIR / 'trash'}; results.csv is backed up first.")
+    if not assume_yes:
+        if not sys.stdin.isatty():
+            print("Not a terminal; re-run with --yes to confirm.")
+            return 4
+        if input("Proceed? [y/N] ").strip().lower() not in ("y", "yes"):
+            print("Cancelled.")
+            return 1
+    res = delete_runs(BENCH_ROOT, plan["found"])
+    print(f"Removed {len(res['removed'])} run(s). Backup: {res['backup']}")
+    print(f"Moved {len(res['moved'])} file(s) to trash. Undo with --undo-delete")
+    return 0
+
+
+def cli_undo_delete() -> int:
+    res = undo_last_delete(BENCH_ROOT)
+    if not res:
+        print("Nothing to undo.")
+        return 1
+    print(f"Restored {len(res['restored_rows'])} run(s) from {res['from_backup']}")
+    print(f"Moved back {len(res['restored_files'])} file(s); skipped {len(res['skipped_files'])}")
+    if res["kept_new_rows"]:
+        print(f"Kept {res['kept_new_rows']} run(s) added after the delete")
     return 0
 
 
@@ -269,8 +416,8 @@ def selftest() -> int:
 # ---------------------------------------------------------------------------
 
 def run_gui() -> int:
-    from PySide6.QtCore import Qt, QProcess, QProcessEnvironment, QTimer, QSize
-    from PySide6.QtGui import QColor, QFont, QAction, QDesktopServices
+    from PySide6.QtCore import Qt, QProcess, QProcessEnvironment, QTimer, QSize, QThread, Signal
+    from PySide6.QtGui import QColor, QFont, QAction, QDesktopServices, QKeySequence, QShortcut
     from PySide6.QtWidgets import (
         QApplication,
         QMainWindow,
@@ -294,8 +441,11 @@ def run_gui() -> int:
         QScrollArea,
         QFrame,
         QSplitter,
+        QMenu,
     )
     from PySide6.QtCore import QUrl
+    import collections
+    import threading
 
     # Optional matplotlib
     HAS_MPL = False
@@ -309,6 +459,48 @@ def run_gui() -> int:
         HAS_MPL = True
     except Exception:
         HAS_MPL = False
+
+    class TempPoller(QThread):
+        """Reads temps one at a time in a background thread (no pileups).
+
+        Idle while paused; the GUI thread only receives finished samples.
+        """
+
+        sample = Signal(object)
+
+        def __init__(self, parent=None) -> None:
+            super().__init__(parent)
+            self._stop = threading.Event()
+            self._wake = threading.Event()
+            self._active = False
+            self.interval_s = 1.5
+
+        def set_active(self, on: bool) -> None:
+            self._active = bool(on)
+            if on:
+                self._wake.set()
+
+        def stop(self) -> None:
+            self._stop.set()
+            self._wake.set()
+
+        def run(self) -> None:  # noqa: D401
+            while not self._stop.is_set():
+                if not self._active:
+                    self._wake.wait(1.0)
+                    self._wake.clear()
+                    continue
+                t0 = time.monotonic()
+                try:
+                    s = read_temps(timeout=1.5)
+                except Exception:
+                    s = None
+                if s is not None and not self._stop.is_set():
+                    self.sample.emit(s)
+                left = self.interval_s - (time.monotonic() - t0)
+                if left > 0:
+                    self._wake.wait(left)
+                    self._wake.clear()
 
     class MainWindow(QMainWindow):
         def __init__(self) -> None:
@@ -339,6 +531,20 @@ def run_gui() -> int:
             self._build_history_tab()
             self._build_compare_tab()
             self._build_changed_tab()
+
+            # Live temperatures (Run tab)
+            self._temp_hist: collections.deque = collections.deque(maxlen=400)
+            self._peak_cpu: float | None = None
+            self._peak_gpu: float | None = None
+            self._temps_log_path: Path | None = None
+            self._temps_log_start = 0.0
+            self._pre_run_ts: set = set()
+            self._chart_dirty_at = 0.0
+            self._temp_poller = TempPoller(self)
+            self._temp_poller.sample.connect(self._on_temp_sample)
+            self._temp_poller.start()
+            tabs.currentChanged.connect(lambda *_: self._update_temp_polling())
+            self._update_temp_polling()
 
             help_menu = self.menuBar().addMenu("&Help")
             about_act = QAction("About", self)
@@ -411,6 +617,50 @@ def run_gui() -> int:
             status_row.addWidget(self.elapsed_label)
             layout.addLayout(status_row)
 
+            temps_box = QGroupBox("Live temperatures")
+            tb = QVBoxLayout(temps_box)
+            trow = QHBoxLayout()
+            self.cpu_temp_label = QLabel("CPU —")
+            self.gpu_temp_label = QLabel("GPU —")
+            for lab in (self.cpu_temp_label, self.gpu_temp_label):
+                lf = lab.font()
+                lf.setPointSize(lf.pointSize() + 2)
+                lf.setBold(True)
+                lab.setFont(lf)
+            self.gpu_extra_label = QLabel("")
+            self.gpu_extra_label.setStyleSheet("color: palette(mid);")
+            reset_peak = QPushButton("Reset peak")
+            reset_peak.clicked.connect(self._reset_temp_peaks)
+            trow.addWidget(self.cpu_temp_label)
+            trow.addSpacing(24)
+            trow.addWidget(self.gpu_temp_label)
+            trow.addWidget(self.gpu_extra_label)
+            trow.addStretch(1)
+            trow.addWidget(reset_peak)
+            tb.addLayout(trow)
+            if HAS_MPL:
+                self.temp_fig = Figure(figsize=(8, 1.6), dpi=100)
+                self.temp_canvas = FigureCanvas(self.temp_fig)
+                self.temp_canvas.setMinimumHeight(130)
+                self.temp_canvas.setMaximumHeight(190)
+                self.temp_ax = self.temp_fig.add_subplot(111)
+                (self.cpu_line,) = self.temp_ax.plot([], [], color="#3b7dd8", linewidth=1.4, label="CPU")
+                (self.gpu_line,) = self.temp_ax.plot([], [], color="#2e9e5b", linewidth=1.4, label="GPU")
+                self.temp_ax.axhspan(70, 85, color="#e0a030", alpha=0.10)
+                self.temp_ax.axhspan(85, 120, color="#be3232", alpha=0.10)
+                self.temp_ax.set_xlim(-300, 0)
+                self.temp_ax.set_ylim(20, 100)
+                self.temp_ax.set_xlabel("seconds (last 5 min)", fontsize=8)
+                self.temp_ax.set_ylabel("°C", fontsize=8)
+                self.temp_ax.tick_params(labelsize=7)
+                self.temp_ax.legend(loc="upper left", fontsize=7)
+                self.temp_fig.tight_layout()
+                tb.addWidget(self.temp_canvas)
+            else:
+                self.temp_fig = None
+                self.temp_canvas = None
+            layout.addWidget(temps_box)
+
             self.log_pane = QPlainTextEdit()
             self.log_pane.setReadOnly(True)
             mono = QFont("monospace")
@@ -434,13 +684,28 @@ def run_gui() -> int:
             top.addWidget(set_bl)
             layout.addLayout(top)
 
-            cols = ["Date", "Tag", "Baseline", "Kernel", "NVIDIA", "Plasma"] + [
+            sel_row = QHBoxLayout()
+            self.sel_all_btn = QPushButton("Select all / none")
+            self.sel_all_btn.clicked.connect(self._toggle_select_all)
+            self.del_btn = QPushButton("Delete selected")
+            self.del_btn.clicked.connect(self._delete_selected)
+            self.undo_btn = QPushButton("Undo last delete")
+            self.undo_btn.clicked.connect(self._undo_delete)
+            self.sel_count = QLabel("")
+            self.sel_count.setStyleSheet("color: palette(mid);")
+            sel_row.addWidget(self.sel_all_btn)
+            sel_row.addWidget(self.del_btn)
+            sel_row.addWidget(self.undo_btn)
+            sel_row.addWidget(self.sel_count, stretch=1)
+            layout.addLayout(sel_row)
+
+            cols = ["", "Date", "Tag", "Baseline", "Kernel", "NVIDIA", "Plasma"] + [
                 c[1] for c in HISTORY_SCORE_COLS
             ]
             self.hist_table = QTableWidget(0, len(cols))
             self.hist_table.setHorizontalHeaderLabels(cols)
             self.hist_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-            self.hist_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+            self.hist_table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
             self.hist_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
             self.hist_table.setSortingEnabled(True)
             self.hist_table.horizontalHeader().setSectionResizeMode(
@@ -448,7 +713,20 @@ def run_gui() -> int:
             )
             self.hist_table.horizontalHeader().setStretchLastSection(True)
             self.hist_table.verticalHeader().setVisible(False)
+            self.hist_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+            self.hist_table.customContextMenuRequested.connect(self._history_menu)
+            self.hist_table.itemChanged.connect(lambda *_: self._update_sel_count())
+            del_sc = QShortcut(QKeySequence(QKeySequence.StandardKey.Delete), self.hist_table)
+            del_sc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+            del_sc.activated.connect(self._delete_selected)
             layout.addWidget(self.hist_table)
+            hint = QLabel(
+                "Tick runs (or select rows) and press Delete. results.csv is backed up first "
+                "and logs move to runs/trash/, so Undo can put them back."
+            )
+            hint.setWordWrap(True)
+            hint.setStyleSheet("color: palette(mid);")
+            layout.addWidget(hint)
 
         # ---- Compare tab ----
         def _build_compare_tab(self) -> None:
@@ -799,6 +1077,8 @@ def run_gui() -> int:
                 self._proc = None
                 return
             self._proc = proc
+            self._start_temps_log()
+            self._update_temp_polling()
 
         def _on_proc_output(self) -> None:
             if self._proc is None:
@@ -855,6 +1135,8 @@ def run_gui() -> int:
             self.cancel_btn.setEnabled(False)
             self.run_btn.setEnabled(True)
             self._proc = None
+            self._finish_temps_log()
+            self._update_temp_polling()
             cancelled = exit_code in (-15, -9) or exit_code == 143
             # Also treat SIGTERM from killpg
             if cancelled or (self.status_line.text().startswith("Cancelling")):
@@ -894,12 +1176,20 @@ def run_gui() -> int:
         def _refresh_history(self) -> None:
             rows = load_rows()
             bl = baseline_timestamp(rows)
+            self.hist_table.blockSignals(True)
             self.hist_table.setSortingEnabled(False)
             self.hist_table.setRowCount(0)
             # Newest first for display
             for r in reversed(rows):
                 row_i = self.hist_table.rowCount()
                 self.hist_table.insertRow(row_i)
+                chk = QTableWidgetItem("")
+                chk.setFlags(
+                    Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
+                )
+                chk.setCheckState(Qt.CheckState.Unchecked)
+                chk.setData(Qt.ItemDataRole.UserRole, r.get("timestamp"))
+                self.hist_table.setItem(row_i, 0, chk)
                 vals = [
                     r.get("timestamp") or "",
                     r.get("tag") or "",
@@ -911,17 +1201,19 @@ def run_gui() -> int:
                 for key, _lab in HISTORY_SCORE_COLS:
                     v = parse_num(r.get(key))
                     vals.append(f"{v:.1f}" if v is not None else "—")
-                for col, val in enumerate(vals):
+                for col, val in enumerate(vals, start=1):
                     item = QTableWidgetItem(val)
-                    if col == 0:
+                    if col == 1:
                         item.setData(Qt.ItemDataRole.UserRole, r.get("timestamp"))
                     # Numeric sort for score cols
-                    if col >= 6:
+                    if col >= 7:
                         num = parse_num(val if val != "—" else None)
                         if num is not None:
                             item.setData(Qt.ItemDataRole.UserRole, num)
                     self.hist_table.setItem(row_i, col, item)
             self.hist_table.setSortingEnabled(True)
+            self.hist_table.blockSignals(False)
+            self._update_sel_count()
 
         def _set_selected_baseline(self) -> None:
             items = self.hist_table.selectedItems()
@@ -929,7 +1221,7 @@ def run_gui() -> int:
                 QMessageBox.information(self, "Select a run", "Select a row in History first.")
                 return
             row = items[0].row()
-            ts_item = self.hist_table.item(row, 0)
+            ts_item = self.hist_table.item(row, 1)
             if not ts_item:
                 return
             ts = ts_item.text().strip()
@@ -938,6 +1230,237 @@ def run_gui() -> int:
             BASELINE_FILE.write_text(ts + "\n")
             self._refresh_all()
             self.status_line.setText(f"Baseline set to {ts}")
+
+        # ---- History selection / delete ----
+        def _checked_ts(self) -> list[str]:
+            out = []
+            for i in range(self.hist_table.rowCount()):
+                it = self.hist_table.item(i, 0)
+                if it is not None and it.checkState() == Qt.CheckState.Checked:
+                    ts = it.data(Qt.ItemDataRole.UserRole)
+                    if ts:
+                        out.append(ts)
+            return out
+
+        def _targets(self) -> list[str]:
+            """Checked runs; if none are ticked, the highlighted rows."""
+            ticked = self._checked_ts()
+            if ticked:
+                return ticked
+            rows = sorted({ix.row() for ix in self.hist_table.selectionModel().selectedRows()})
+            out = []
+            for r in rows:
+                it = self.hist_table.item(r, 1)
+                if it is not None and it.text().strip():
+                    out.append(it.text().strip())
+            return out
+
+        def _update_sel_count(self) -> None:
+            n = len(self._checked_ts())
+            self.sel_count.setText(f"{n} ticked" if n else "")
+            self.undo_btn.setEnabled(last_delete(BENCH_ROOT) is not None)
+
+        def _toggle_select_all(self) -> None:
+            n = self.hist_table.rowCount()
+            if not n:
+                return
+            all_on = len(self._checked_ts()) == n
+            state = Qt.CheckState.Unchecked if all_on else Qt.CheckState.Checked
+            self.hist_table.blockSignals(True)
+            for i in range(n):
+                it = self.hist_table.item(i, 0)
+                if it is not None:
+                    it.setCheckState(state)
+            self.hist_table.blockSignals(False)
+            self._update_sel_count()
+
+        def _history_menu(self, pos) -> None:
+            menu = QMenu(self)
+            a_del = menu.addAction("Delete selected…")
+            a_bl = menu.addAction("Set as baseline")
+            menu.addSeparator()
+            a_all = menu.addAction("Select all / none")
+            a_undo = menu.addAction("Undo last delete")
+            a_undo.setEnabled(last_delete(BENCH_ROOT) is not None)
+            chosen = menu.exec(self.hist_table.viewport().mapToGlobal(pos))
+            if chosen == a_del:
+                self._delete_selected()
+            elif chosen == a_bl:
+                self._set_selected_baseline()
+            elif chosen == a_all:
+                self._toggle_select_all()
+            elif chosen == a_undo:
+                self._undo_delete()
+
+        def _delete_selected(self) -> None:
+            ts_list = self._targets()
+            if not ts_list:
+                QMessageBox.information(self, "Nothing selected", "Tick or select runs to delete first.")
+                return
+            if self._proc is not None:
+                QMessageBox.information(self, "Benchmark running", "Wait for the running benchmark to finish first.")
+                return
+            plan = plan_delete(BENCH_ROOT, ts_list)
+            found = plan["found"]
+            if not found:
+                return
+            preview = "\n".join(found[:12]) + (f"\n… and {len(found) - 12} more" if len(found) > 12 else "")
+            reply = QMessageBox.question(
+                self,
+                "Delete runs",
+                f"Remove {len(found)} run(s) from History?\n\n{preview}\n\n"
+                f"results.csv is backed up first and {len(plan['files'])} log/sidecar file(s) "
+                "move to runs/trash/. You can undo this.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+            bl = active_baseline_ts() or baseline_timestamp(load_rows())
+            if bl and bl in found:
+                reply = QMessageBox.warning(
+                    self,
+                    "Baseline selected",
+                    f"{bl} is your baseline run. Comparisons against the baseline will be empty "
+                    "until you set a new one or undo.\n\nDelete the baseline too?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No,
+                )
+                if reply != QMessageBox.StandardButton.Yes:
+                    return
+            try:
+                res = delete_runs(BENCH_ROOT, found)
+            except Exception as e:  # nothing removed if backup failed
+                QMessageBox.critical(self, "Delete failed", str(e))
+                return
+            self._refresh_all()
+            self.status_line.setText(
+                f"Deleted {len(res['removed'])} run(s); backup {Path(res['backup']).name}"
+            )
+            QMessageBox.information(
+                self, "Deleted",
+                f"Removed {len(res['removed'])} run(s).\nBackup: {res['backup']}\n"
+                f"Moved {len(res['moved'])} file(s) to runs/trash/.",
+            )
+
+        def _undo_delete(self) -> None:
+            m = last_delete(BENCH_ROOT)
+            if not m:
+                QMessageBox.information(self, "Undo", "Nothing to undo.")
+                return
+            n = len(m.get("removed") or [])
+            reply = QMessageBox.question(
+                self, "Undo last delete",
+                f"Restore {n} run(s) from {Path(m['backup']).name} and move their files back?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+            try:
+                res = undo_last_delete(BENCH_ROOT)
+            except Exception as e:
+                QMessageBox.critical(self, "Undo failed", str(e))
+                return
+            self._refresh_all()
+            if res:
+                self.status_line.setText(f"Restored {len(res['restored_rows'])} run(s).")
+
+        # ---- Live temperatures ----
+        def _update_temp_polling(self) -> None:
+            on_run_tab = self._tabs.currentWidget() is self.run_tab
+            active = on_run_tab or self._proc is not None
+            # Slower during a benchmark to keep overhead negligible
+            self._temp_poller.interval_s = 2.0 if self._proc is not None else 1.5
+            self._temp_poller.set_active(active and self.isVisible() or (self._proc is not None))
+
+        def showEvent(self, event) -> None:  # noqa: N802
+            super().showEvent(event)
+            if hasattr(self, "_temp_poller"):
+                self._update_temp_polling()
+
+        def _reset_temp_peaks(self) -> None:
+            self._peak_cpu = None
+            self._peak_gpu = None
+
+        def _style_for(self, t: float | None) -> str:
+            return {
+                "green": "color: #1e8c46;",
+                "amber": "color: #d08a00;",
+                "red": "color: #be3232;",
+            }.get(temp_level(t), "color: palette(mid);")
+
+        def _on_temp_sample(self, s) -> None:
+            if s.cpu_c is not None:
+                self._peak_cpu = s.cpu_c if self._peak_cpu is None else max(self._peak_cpu, s.cpu_c)
+            if s.gpu_c is not None:
+                self._peak_gpu = s.gpu_c if self._peak_gpu is None else max(self._peak_gpu, s.gpu_c)
+            self._temp_hist.append((s.t, s.cpu_c, s.gpu_c))
+            # Log during a run (separate file; results.csv untouched)
+            if self._temps_log_path is not None:
+                try:
+                    with self._temps_log_path.open("a") as f:
+                        f.write(temps_csv_line(s, self._temps_log_start))
+                except OSError:
+                    self._temps_log_path = None
+            def fmt(v):
+                return "—" if v is None else f"{v:.0f}°C"
+            if s.cpu_c is None and "missing" in (s.cpu_source or ""):
+                self.cpu_temp_label.setText("CPU — (install lm_sensors)")
+            else:
+                self.cpu_temp_label.setText(f"CPU {fmt(s.cpu_c)}  (peak {fmt(self._peak_cpu)})")
+            self.cpu_temp_label.setStyleSheet(self._style_for(s.cpu_c))
+            if s.gpu_source == "no nvidia-smi":
+                self.gpu_temp_label.setText("GPU — (no nvidia-smi)")
+                self.gpu_extra_label.setText("")
+            else:
+                self.gpu_temp_label.setText(f"GPU {fmt(s.gpu_c)}  (peak {fmt(self._peak_gpu)})")
+                bits = []
+                if s.gpu_util is not None:
+                    bits.append(f"{s.gpu_util:.0f}% util")
+                if s.gpu_power_w is not None:
+                    bits.append(f"{s.gpu_power_w:.0f} W")
+                self.gpu_extra_label.setText("  ".join(bits))
+            self.gpu_temp_label.setStyleSheet(self._style_for(s.gpu_c))
+            if self.temp_canvas is not None and self._tabs.currentWidget() is self.run_tab:
+                self._redraw_temp_chart(s.t)
+
+        def _redraw_temp_chart(self, now: float) -> None:
+            pts = [p for p in self._temp_hist if now - p[0] <= 300]
+            xs_c = [p[0] - now for p in pts if p[1] is not None]
+            ys_c = [p[1] for p in pts if p[1] is not None]
+            xs_g = [p[0] - now for p in pts if p[2] is not None]
+            ys_g = [p[2] for p in pts if p[2] is not None]
+            self.cpu_line.set_data(xs_c, ys_c)
+            self.gpu_line.set_data(xs_g, ys_g)
+            hi = max(ys_c + ys_g, default=0)
+            self.temp_ax.set_ylim(20, max(100, hi + 5))
+            self.temp_canvas.draw_idle()
+
+        def _start_temps_log(self) -> None:
+            self._pre_run_ts = {r.get("timestamp") for r in load_rows()}
+            self._temps_log_start = time.time()
+            path = RUNS_DIR / f"live-{time.strftime('%Y%m%d-%H%M%S')}.temps.csv"
+            try:
+                path.write_text(TEMPS_CSV_HEADER)
+                self._temps_log_path = path
+            except OSError:
+                self._temps_log_path = None
+            self._reset_temp_peaks()
+
+        def _finish_temps_log(self) -> None:
+            path, self._temps_log_path = self._temps_log_path, None
+            if path is None or not path.is_file():
+                return
+            new = [r.get("timestamp") for r in load_rows() if r.get("timestamp") not in self._pre_run_ts]
+            if new and new[-1]:
+                dst = RUNS_DIR / f"{new[-1]}.temps.csv"
+                if not dst.exists():
+                    try:
+                        path.rename(dst)
+                        self._append_log(f"Temperature log: {dst}\n")
+                    except OSError:
+                        pass
 
         def _refresh_compare_combos(self) -> None:
             rows = load_rows()
@@ -1143,6 +1666,8 @@ def run_gui() -> int:
                 # Brief wait
                 if self._proc is not None:
                     self._proc.waitForFinished(3000)
+            self._temp_poller.stop()
+            self._temp_poller.wait(3000)
             event.accept()
 
     # HiDPI: respect Plasma scaling; also set AA
@@ -1153,6 +1678,7 @@ def run_gui() -> int:
     app.setDesktopFileName("cachy-bench")
     win = MainWindow()
     win.show()
+    app.aboutToQuit.connect(lambda: (win._temp_poller.stop(), win._temp_poller.wait(3000)))
     # If offscreen, auto-quit after a moment for CI-style smoke
     if os.environ.get("QT_QPA_PLATFORM") == "offscreen":
         QTimer.singleShot(800, app.quit)
@@ -1168,6 +1694,15 @@ def main() -> int:
     if "--check-deps" in sys.argv:
         missing = check_deps(verbose=True)
         return 1 if missing else 0
+    if "--temps-once" in sys.argv:
+        print(format_sample(read_temps(timeout=3.0)))
+        return 0
+    if "--delete-runs" in sys.argv:
+        i = sys.argv.index("--delete-runs")
+        arg = sys.argv[i + 1] if i + 1 < len(sys.argv) else ""
+        return cli_delete_runs(arg, "--yes" in sys.argv, "--allow-baseline" in sys.argv)
+    if "--undo-delete" in sys.argv:
+        return cli_undo_delete()
     if "--what-changed" in sys.argv:
         rows = load_rows()
         report = build_what_changed(rows, baseline_ts=active_baseline_ts(), runs_dir=RUNS_DIR, data_dir=BENCH_ROOT)
